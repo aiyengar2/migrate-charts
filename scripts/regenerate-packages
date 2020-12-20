@@ -1,0 +1,113 @@
+#!/bin/bash
+set -e
+
+cd $(dirname $0)
+
+if [[ -z ${REPOSITORY} ]]; then
+    echo "Need to provide REPOSITORY as environment variable"
+    exit 1
+fi
+
+cd ..
+
+# Setup
+rm -rf ./repository
+mkdir -p ./repository
+cd repository
+
+# Pull in branch
+branch=$(git rev-parse --abbrev-ref HEAD)
+echo "Pulling in ${REPOSITORY}@${branch}"
+git clone --depth 1 --branch ${branch} ${REPOSITORY} . > /dev/null 2>&1
+
+if ! (test -d packages); then
+    echo "There are no packages in this repository"
+    cd ..
+    rm -rf ./repository
+    exit 1
+fi
+
+# Run make prepare to get all the packages passed through the scripts
+make prepare
+
+# Copy the working directories of the packages after running prepare on them
+for package in packages/*; do
+    cp -R ${package} ../packages/
+done
+
+# Go back
+cd ..
+rm -rf ./repository
+
+# Delete any files that are no longer relevant
+for package in packages/*; do
+    if test -d ${package}; then
+        if test -d ${package}/overlay; then
+            cp -R ${package}/overlay/* ${package}/charts # Usually happens on make charts
+            rm -rf ${package}/overlay
+        fi
+        if test -f ${package}/*.patch; then
+            rm ${package}/*.patch
+        fi
+    fi
+done
+
+# Apply logic to packages for all special situations
+
+for package in packages/*; do    
+    
+    if ! (test -d ${package}); then
+        continue
+    fi
+
+    # Local charts
+    if ! (test -f ${package}/package.yaml); then
+        # Local chart has no package.yaml
+        yq n 'url' 'local' > ${package}/package.yaml
+    elif [[ -z $(yq r ${package}/package.yaml 'url') ]]; then
+        # Local chart's package.yaml does not have url
+        yq w -i ${package}/package.yaml 'url' 'local'
+    fi
+
+    # Remove deprecated fields and add additional fields
+    if [[ -n $(yq r ${package}/package.yaml 'type') ]]; then
+        yq d -i ${package}/package.yaml 'type'
+    fi
+    if [[ -z $(yq r ${package}/package.yaml 'packageVersion') ]]; then
+        yq w -i ${package}/package.yaml 'packageVersion' '00'
+    fi
+    yq w -i ${package}/package.yaml 'releaseCandidateVersion' '00'
+    
+    # CRD charts
+    if [[ -z $(yq r ${package}/package.yaml 'generateCRDChart') ]]; then
+        continue
+    fi
+    if [[ $(yq r ${package}/package.yaml 'generateCRDChart.enabled') != "true" ]]; then
+        rm -rf ${package}/charts-crd
+        continue
+    fi
+    unset assume_ownership_of_crds
+    if [[ $(yq r ${package}/package.yaml 'generateCRDChart.assumeOwnershipOfCRDs') == "true" ]]; then
+        assume_ownership_of_crds=1
+    fi
+    # Copy template out to templates/crd-template
+    mkdir -p ${package}/templates/crd-template
+    cp -R ${package}/charts-crd/* ${package}/templates/crd-template
+    if [[ -z ${assume_ownership_of_crds} ]]; then
+        rm -rf ${package}/templates/crd-template/templates
+    else
+        rm -rf ${package}/templates/crd-template/crd-manifest
+    fi
+    # Remove validate-install-crd.yaml file from original chart
+    rm ${package}/charts/templates/validate-install-crd.yaml
+    # Remove generateCRDChart from package.yaml
+    yq d -i ${package}/package.yaml 'generateCRDChart'
+
+    # Do a make patch with the current scripts
+    make PACKAGE=$(basename -- ${package}) patch
+
+    # Add back in to package.yaml as additional chart
+done
+
+# CRD chart (has charts-crd)
+## Which template (check package.yaml)
