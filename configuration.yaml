@@ -1,0 +1,8 @@
+template: source
+
+validate:
+- url: https://github.com/aiyengar2/charts-demo.git
+  branch: dev-v2.5
+- url: https://github.com/aiyengar2/charts-demo.git
+  branch: main
+  dropReleaseCandidates: true
